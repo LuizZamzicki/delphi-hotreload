@@ -15,7 +15,10 @@
   build vêm de "hrctl setup", que lê as opções da IDE pelo msbuild: nada fica preso à máquina.
   O resultado vai para a janela Messages, grupo "Hot Reload"; erro de compilação leva à linha.
 
-  O hrctl.exe é procurado em ..\..\hrctl\bin\hrctl.exe, a partir da pasta deste .bpl.
+  A pasta do hot reload (onde ficam src\ e tools\hrctl\bin\hrctl.exe) vem do registro
+  HKCU\Software\HotReloadIDE\Home, gravado pelo build\build-ide.bat (a IDE costuma carregar o
+  .bpl de uma cópia na pasta Bpl padrão, longe do repositório). Sem ele, tenta a pasta do .bpl e
+  C:\Projetos Loja\hotreload; o menu "Pasta do hot reload..." escolhe à mão.
 *)
 
 interface
@@ -27,7 +30,7 @@ implementation
 uses
   Winapi.Windows, System.SysUtils, System.Classes, System.JSON, System.IOUtils, System.Hash,
   System.Win.Registry, System.Generics.Collections, System.RegularExpressions, System.StrUtils,
-  Vcl.Menus, Vcl.Forms, Vcl.Dialogs, Vcl.ExtCtrls, ToolsAPI;
+  Vcl.Menus, Vcl.Forms, Vcl.Dialogs, Vcl.ExtCtrls, Vcl.FileCtrl, ToolsAPI;
 
 const
   ConfigName = 'HotReload';
@@ -76,8 +79,11 @@ type
     function Group: IOTAMessageGroup;
     procedure Title(const S: string; Show: Boolean = False);
     procedure ToolMsg(const FileName, S: string; Line: Integer);
+    function Home: string;
     function HrctlPath: string;
     function SrcDir: string;
+    function CheckHome: Boolean;
+    procedure DoChooseHome(Sender: TObject);
     function ActiveConfig(const P: IOTAProject): string;
     function ProjectReady(out P: IOTAProject): Boolean;
     procedure AddMenu;
@@ -342,15 +348,74 @@ begin
   (BorlandIDEServices as IOTAMessageServices).AddToolMessage(FileName, S, GroupName, Line, 1, nil, Ref, Group);
 end;
 
+function IsHome(const Dir: string): Boolean;
+begin
+  Result := (Dir <> '') and FileExists(IncludeTrailingPathDelimiter(Dir) + 'tools\hrctl\bin\hrctl.exe');
+end;
+
+/// Pasta do repositório do hot reload (com src\ e tools\hrctl\bin\hrctl.exe); '' se não achar.
+function TExpert.Home: string;
+var
+  R: TRegistry;
+begin
+  Result := '';
+  R := TRegistry.Create(KEY_READ);
+  try
+    if R.OpenKeyReadOnly(RegKey) and R.ValueExists('Home') then
+      Result := R.ReadString('Home');
+  finally
+    R.Free;
+  end;
+  if not IsHome(Result) then
+    Result := ExpandFileName(ExtractFilePath(GetModuleName(HInstance)) + '..\..\..'); // <repo>\tools\ide\bin
+  if not IsHome(Result) then
+    Result := 'C:\Projetos Loja\hotreload';
+  if IsHome(Result) then
+    Result := IncludeTrailingPathDelimiter(Result)
+  else
+    Result := '';
+end;
+
 function TExpert.HrctlPath: string;
 begin
-  // <repo>\tools\ide\bin\HotReloadIDE.bpl  ->  <repo>\tools\hrctl\bin\hrctl.exe
-  Result := ExpandFileName(ExtractFilePath(GetModuleName(HInstance)) + '..\..\hrctl\bin\hrctl.exe');
+  Result := Home + 'tools\hrctl\bin\hrctl.exe';
 end;
 
 function TExpert.SrcDir: string;
 begin
-  Result := ExpandFileName(ExtractFilePath(GetModuleName(HInstance)) + '..\..\..\src\');
+  Result := Home + 'src\';
+end;
+
+function TExpert.CheckHome: Boolean;
+begin
+  Result := Home <> '';
+  if not Result then
+    Title('não achei a pasta do hot reload (com tools\hrctl\bin\hrctl.exe): rode build\build-ide.bat e ' +
+      'build\build-hrctl.bat no repositório, ou use Hot Reload > Pasta do hot reload...', True);
+end;
+
+procedure TExpert.DoChooseHome(Sender: TObject);
+var
+  Dir: string;
+  R: TRegistry;
+begin
+  Dir := Home;
+  if not SelectDirectory('Pasta do repositório do hot reload (com src e tools)', '', Dir) then
+    Exit;
+  if not IsHome(Dir) then
+  begin
+    Title('essa pasta não tem tools\hrctl\bin\hrctl.exe (rode build\build-hrctl.bat nela)', True);
+    Exit;
+  end;
+  R := TRegistry.Create;
+  try
+    if R.OpenKey(RegKey, True) then
+      R.WriteString('Home', ExcludeTrailingPathDelimiter(Dir));
+  finally
+    R.Free;
+  end;
+  FSetups.Clear;
+  Title('pasta do hot reload: ' + Dir, True);
 end;
 
 function TExpert.ActiveConfig(const P: IOTAProject): string;
@@ -371,11 +436,8 @@ begin
     Title('nenhum projeto ativo', True);
     Exit;
   end;
-  if not FileExists(HrctlPath) then
-  begin
-    Title('hrctl.exe não encontrado em ' + HrctlPath + ' (rode build\build-hrctl.bat)', True);
+  if not CheckHome then
     Exit;
-  end;
   if not SameText(ActiveConfig(P), ConfigName) then
   begin
     Title(Format('selecione a configuração %s (Hot Reload > Ativar neste projeto, se ainda não existir)',
@@ -411,6 +473,8 @@ begin
   Item('&Reiniciar (recompila e volta nas mesmas telas)', DoRestart);
   Item('-', nil);
   FAuto := Item('Patch automático ao &salvar', DoToggleAuto);
+  Item('-', nil);
+  Item('Pasta do &hot reload...', DoChooseHome);
   FAuto.Checked := True;
   R := TRegistry.Create(KEY_READ);
   try
@@ -479,6 +543,8 @@ begin
     Title('nenhum projeto ativo', True);
     Exit;
   end;
+  if not CheckHome then
+    Exit;
   Changed := False;
 
   // 1. Build configuration HotReload, filha da Release.
@@ -650,7 +716,7 @@ var
 begin
   FBusy := True;
   Title(Caption);
-  Dir := ExtractFileDir(HrctlPath);
+  Dir := ExcludeTrailingPathDelimiter(TPath.GetTempPath);
   TThread.CreateAnonymousThread(
     procedure
     var
