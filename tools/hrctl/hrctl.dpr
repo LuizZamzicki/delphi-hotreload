@@ -195,20 +195,14 @@ begin
         ResetEvent(OV.hEvent);
         Ok := ReadFile(H, Buf, SizeOf(Buf), N, @OV);
         Err := 0;
-        Pend := False;
+        if (not Ok) and (GetLastError = ERROR_IO_PENDING) then
+          Ok := Esperar(H, OV, Fim, N, True)
+        else
+          // Em handle overlapped, o N do ReadFile não vale: o tamanho certo vem daqui, também
+          // quando a leitura termina na hora com ERROR_MORE_DATA (resposta maior que o buffer).
+          Ok := GetOverlappedResult(H, OV, N, False);
         if not Ok then
-        begin
           Err := GetLastError;
-          Pend := Err = ERROR_IO_PENDING;
-        end;
-        if Pend then
-        begin
-          Ok := Esperar(H, OV, Fim, N, True);
-          Err := 0;
-          if not Ok then Err := GetLastError;
-        end
-        else if Ok then
-          GetOverlappedResult(H, OV, N, False);
         if (not Ok) and (Err <> ERROR_MORE_DATA) then
           Falha('erro: falha ao ler resposta (erro ' + IntToStr(Err) + ')', 2);
         if N > 0 then

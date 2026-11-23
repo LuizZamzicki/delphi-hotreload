@@ -1249,16 +1249,14 @@ begin
       N := 0;
       Err := 0;
       Ok := ReadFile(Pipe, Chunk, SizeOf(Chunk), N, @Ov);
+      if not Ok and (GetLastError = ERROR_IO_PENDING) then
+        Ok := WaitIo(Pipe, Ov, 5000, N)
+      else
+        // Em handle overlapped, o N do ReadFile não vale: o tamanho certo vem daqui, também
+        // quando a leitura termina na hora com ERROR_MORE_DATA (pedido maior que 8 KB).
+        Ok := GetOverlappedResult(Pipe, Ov, N, False);
       if not Ok then
-      begin
         Err := GetLastError;
-        if Err = ERROR_IO_PENDING then
-        begin
-          Ok := WaitIo(Pipe, Ov, 5000, N);
-          if not Ok then
-            Err := GetLastError;
-        end;
-      end;
       if Ok or (Err = ERROR_MORE_DATA) then
         Data.WriteBuffer(Chunk, N);
     until Ok or (Err <> ERROR_MORE_DATA);
