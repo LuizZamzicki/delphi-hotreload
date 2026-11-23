@@ -11,7 +11,8 @@ uses
   System.Math,
   Winapi.ShellAPI,
   System.JSON,
-  HrPatch in 'HrPatch.pas';
+  HrPatch in 'HrPatch.pas',
+  HrSetup in 'HrSetup.pas';
 
 const
   PIPE_PREFIX = '\\.\pipe\';
@@ -21,6 +22,7 @@ var
   GPid: Integer = 0;
   GTimeout: Integer = 15000;
   GJson: Boolean = False;
+  GExe: string = '';
 
 procedure Uso;
 begin
@@ -49,11 +51,16 @@ begin
   Writeln('                                  o build precisa gerar exe, .map e .obj (-J) em outra pasta');
   Writeln('                                  (HOTRELOAD_PATCH_BUILD / HOTRELOAD_PATCH_EXE)');
   Writeln('  unpatch                         desfaz os patches de codigo');
+  Writeln('  setup --project <X.dproj> [--config HotReload] [--platform Win32] [--no-console]');
+  Writeln('                                  prepara o hot reload na maquina: le as opcoes da IDE pelo');
+  Writeln('                                  msbuild e gera resp/make/patch em %LOCALAPPDATA%\HotReload');
+  Writeln('                                  e o hotreload.ini ao lado do exe');
   Writeln('  watch --dir <fonte> --patch-build "<cmd>" --new <exe novo> --build "<cmd>" [--auto-restart]');
   Writeln('                                  modo para humanos: a cada .pas salvo roda o patch sozinho;');
   Writeln('                                  mudanca de estrutura pede R (ou reinicia com --auto-restart)');
   Writeln('opcoes:');
   Writeln('  --pid N       escolhe o exe pelo PID quando ha varios');
+  Writeln('  --exe CAMINHO escolhe o exe pelo caminho (o que estiver rodando a partir dele)');
   Writeln('  --timeout MS  tempo maximo total (padrao 15000)');
   Writeln('  --json        imprime a resposta JSON crua');
   Writeln('saida: 0 ok, 1 erro do servidor, 2 pipe nao encontrado, 3 timeout, 4 build falhou,');
@@ -629,6 +636,25 @@ begin
   Writeln(Format('patch aplicado (build %.1f s, total %.1f s)', [(T1 - T0) / 1000, (GetTickCount64 - T0) / 1000]));
 end;
 
+/// PID do exe com hot reload rodando a partir de Caminho; 0 se nenhum.
+function PidDoExe(const Caminho: string): Integer;
+var
+  P: string;
+  Info: TJSONObject;
+begin
+  Result := 0;
+  for P in ListarPipes do
+  begin
+    Info := Pedir(P, 'ping', []);
+    try
+      if SameText(ExpandFileName(Info.GetValue<string>('exe', '')), ExpandFileName(Caminho)) then
+        Exit(Info.GetValue<Integer>('pid', 0));
+    finally
+      Info.Free;
+    end;
+  end;
+end;
+
 { watch: modo para humanos }
 
 type
@@ -923,10 +949,48 @@ begin
   end;
 end;
 
+procedure Preparar(const Projeto, Config, Plataforma: string; SemConsole: Boolean);
+var
+  Log: TStringList;
+  R: TJSONObject;
+  L: string;
+begin
+  if Projeto = '' then
+    Falha('erro: passe --project <arquivo.dproj>', 1);
+  Log := TStringList.Create;
+  try
+    try
+      R := RunSetup(Projeto, Config, Plataforma, not SemConsole, Log);
+    except
+      on E: Exception do
+      begin
+        for L in Log do
+          Writeln(L);
+        Falha('erro: ' + E.Message, 1);
+        Exit;
+      end;
+    end;
+    try
+      if GJson then
+        Writeln(R.ToJSON)
+      else
+      begin
+        for L in Log do
+          Writeln(L);
+        Writeln('RESULTADO ' + R.ToJSON); // última linha: o plugin da IDE lê daqui
+      end;
+    finally
+      R.Free;
+    end;
+  finally
+    Log.Free;
+  end;
+end;
+
 var
   I: Integer;
-  A, Cmd, Build, NovoExe, PatchBuild, Dir: string;
-  Int3, AutoRestart: Boolean;
+  A, Cmd, Build, NovoExe, PatchBuild, Dir, Projeto, Config, Plataforma: string;
+  Int3, AutoRestart, SemConsole: Boolean;
   Args: TStringList;
   Req: TJSONObject;
   Arr: TJSONArray;
@@ -939,6 +1003,9 @@ begin
   Args := TStringList.Create;
   Int3 := False;
   AutoRestart := False;
+  SemConsole := False;
+  Config := 'HotReload';
+  Plataforma := 'Win32';
   I := 1;
   while I <= ParamCount do
   begin
@@ -969,6 +1036,28 @@ begin
       Int3 := True
     else if SameText(A, '--auto-restart') then
       AutoRestart := True
+    else if SameText(A, '--no-console') then
+      SemConsole := True
+    else if SameText(A, '--exe') and (I < ParamCount) then
+    begin
+      Inc(I);
+      GExe := ParamStr(I);
+    end
+    else if SameText(A, '--project') and (I < ParamCount) then
+    begin
+      Inc(I);
+      Projeto := ParamStr(I);
+    end
+    else if SameText(A, '--config') and (I < ParamCount) then
+    begin
+      Inc(I);
+      Config := ParamStr(I);
+    end
+    else if SameText(A, '--platform') and (I < ParamCount) then
+    begin
+      Inc(I);
+      Plataforma := ParamStr(I);
+    end
     else if SameText(A, '--patch-build') and (I < ParamCount) then
     begin
       Inc(I);
@@ -1002,6 +1091,18 @@ begin
     for P in Pipes do
       Writeln(P);
     Halt(0);
+  end;
+
+  if SameText(Cmd, 'setup') then
+  begin
+    Preparar(Projeto, Config, Plataforma, SemConsole);
+    Halt(0);
+  end;
+  if GExe <> '' then
+  begin
+    GPid := PidDoExe(GExe);
+    if GPid = 0 then
+      Falha('nenhum exe com hot reload rodando a partir de ' + GExe, 2);
   end;
 
   if SameText(Cmd, 'restart') then

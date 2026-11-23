@@ -122,6 +122,53 @@ alteradas muda. No demo, o ciclo leva cerca de 1 s.
 - O código de `initialization` não roda de novo.
 - Com o depurador da IDE ligado, o `INT3` para no depurador.
 
+## Plugin da IDE (o jeito mais fácil)
+
+Um pacote de design-time para o Delphi 12 (`tools\ide`). Faz na própria IDE o papel do `watch`:
+o patch roda quando você salva, e o resultado aparece na janela **Messages** (grupo "Hot
+Reload"). Erro de compilação leva à linha com duplo clique.
+
+Menu **Hot Reload**:
+- **Ativar neste projeto:** cria a build configuration HotReload (filha da Release, com o define
+  `HOTRELOAD` e `.map` detalhado). Acrescenta ao `.dpr`, dentro de `{$IFDEF HOTRELOAD}`, as units
+  de `src\` (caminho relativo) e o `THotReload.Start([])`. Depois roda o `hrctl setup`.
+- **Patch agora** e **Reiniciar**.
+- **Patch automático ao salvar:** ligado por padrão. Só dispara com a configuração HotReload
+  ativa e quando o `.pas` mudou de fato; o `.dfm` o próprio exe aplica.
+
+O plugin chama o `hrctl` (procurado em `tools\hrctl\bin`, a partir do `.bpl`). Os comandos de
+build vêm do `hrctl setup`, que lê as opções da IDE pelo `msbuild`, então não há caminho fixo da
+máquina de ninguém.
+
+### Para mandar para outra pessoa
+
+1. Clonar este repositório (de preferência em `C:\Projetos Loja\hotreload`, ao lado dos
+   projetos).
+2. Rodar `build\build-hrctl.bat` e `build\build-ide.bat` (Delphi 12 no caminho padrão).
+3. Na IDE: **Component > Install Packages > Add...** e escolher
+   `tools\ide\bin\HotReloadIDE.bpl`.
+4. Abrir o projeto, **Hot Reload > Ativar neste projeto**, escolher a configuração HotReload e
+   rodar (F9). A partir daí, é salvar e ver a mudança.
+
+Se o programa precisa de arquivos ao lado do exe (`config.ini`, DLLs, banco), aponte o "Output
+directory" da configuração HotReload para uma pasta que os tenha.
+
+### `hrctl setup`
+
+```
+hrctl setup --project X.dproj [--config HotReload] [--platform Win32] [--no-console]
+```
+
+1. Roda o `msbuild` só para capturar a linha do `dcc32`. O `msbuild` registra a linha inteira
+   mesmo quando ela passa de 32 mil caracteres e a execução falha, que é o caso do ERP.
+2. Gera, em `%LOCALAPPDATA%\HotReload\<projeto>-<hash>`:
+   - `resp.txt`: a linha sem `-B`;
+   - `make.bat`: o build do restart;
+   - `patch.bat`: `-J` mais o link em `patch\`.
+3. Grava o `hotreload.ini` ao lado do exe, com a pasta do fonte e esses comandos.
+
+Funciona sem o plugin também: sem `--no-console`, o exe abre o console do `watch` sozinho.
+
 ## Para humanos: `hrctl watch`
 
 O exe abre sozinho o console do `watch` quando inicia, desde que exista um `hotreload.ini` ao
@@ -178,5 +225,6 @@ fora.
 
 - `src\`: biblioteca (`HotReload`, `HotReload.DfmModel`, `HotReload.DfmApply`, `HotReload.Control`, `HotReload.Patch`)
 - `tools\hrctl\`: CLI para agentes (`build\build-hrctl.bat`)
+- `tools\ide\`: plugin da IDE (`build\build-ide.bat` gera `tools\ide\bin\HotReloadIDE.bpl`)
 - `demo\`: app de exemplo (`build\build-demo.bat` gera `demo\bin\HotDemo.exe`)
 - `tests\`: testes automáticos (`build\build-tests.bat` compila e roda)

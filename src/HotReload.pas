@@ -598,6 +598,30 @@ begin
     Log('não consegui abrir o hrctl watch: ' + SysErrorMessage(GetLastError));
 end;
 
+/// Pasta do fonte a vigiar, do [watch] dir= do hotreload.ini ao lado do exe.
+function IniWatchDirs: TArray<string>;
+var
+  Ini: TIniFile;
+  F, D: string;
+begin
+  Result := nil;
+  F := ExtractFilePath(ParamStr(0)) + 'hotreload.ini';
+  if not FileExists(F) then
+    Exit;
+  Ini := TIniFile.Create(F);
+  try
+    D := Ini.ReadString('watch', 'dir', '');
+  finally
+    Ini.Free;
+  end;
+  if D <> '' then
+  begin
+    if ExtractFileDrive(D) = '' then
+      D := ExpandFileName(ExtractFilePath(ParamStr(0)) + D);
+    Result := [D];
+  end;
+end;
+
 { THotReload }
 
 class procedure THotReload.Start(const Dirs: array of string);
@@ -614,6 +638,8 @@ begin
   end
   else
     List := GetEnvironmentVariable('HOTRELOAD_DIRS').Split([';'], TStringSplitOptions.ExcludeEmpty);
+  if Length(List) = 0 then
+    List := IniWatchDirs; // gerado pelo "hrctl setup" / plugin da IDE: sem caminho fixo no .dpr
   if GTracker = nil then
     GTracker := TTracker.Create;
   StartControlServer;
