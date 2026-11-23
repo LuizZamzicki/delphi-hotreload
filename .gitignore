@@ -1,0 +1,20 @@
+# Saída de build do Delphi (gerada por build\*.bat)
+bin/
+dcu/
+*.dcu
+*.exe
+*.map
+*.drc
+*.obj
+*.res
+
+# Exe renomeado pelo "hrctl restart" durante o build
+*.hr-old
+
+# IDE
+__history/
+__recovery/
+*.identcache
+*.local
+*.stat
+*.dsk
