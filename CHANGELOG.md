@@ -1,11 +1,5 @@
 # Changelog
 
-## v0.1.1
-
-- Corrige o canal entre o hrctl e o exe para mensagens grandes: pedidos acima de 8 KB (patch de
-  métodos grandes) e respostas acima de 64 KB (dump de telas grandes) chegavam corrompidos
-  ("o pedido não é um objeto JSON").
-
 ## v0.1.0
 
 Primeira versão pública.
