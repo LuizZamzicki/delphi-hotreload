@@ -13,8 +13,11 @@
     - propriedade que saiu do DFM: volta ao padrão, copiado de uma instância nova da classe;
     - componente que trocou de pai: Parent := novo pai.
 
-  Limites conhecidos: posições não são reescaladas quando a tela roda em DPI diferente do
-  DFM; componente cuja classe não está linkada no exe não pode ser criado (classe usada como
+  Posições e tamanhos que mudaram são convertidos para o valor em execução antes de aplicar
+  (ver AdjustToRuntime): a tela viva já foi escalada para o DPI do monitor e reposicionada por
+  âncoras/alinhamento, e o DFM está em coordenadas de design.
+
+  Limites conhecidos: componente cuja classe não está linkada no exe não pode ser criado (classe usada como
   campo em qualquer form está; uma citada só num "is" pode não estar); evento que aponta
   para método ainda não compilado fica como estava (avisa no log).
 }
@@ -356,6 +359,129 @@ end;
 
 /// Instância "limpa" para copiar valores padrão. Para a raiz usa a classe base da VCL, porque
 /// a classe do próprio form (TFormCliente) carregaria o DFM dela ao ser criada.
+/// Propriedade de posição/tamanho que a VCL escala com o DPI (ScaleForPPI).
+function IsScaledProp(const Name: string): Boolean;
+const
+  Last: array[0..10] of string = ('Left', 'Top', 'Width', 'Height', 'ClientWidth', 'ClientHeight',
+    'MinWidth', 'MinHeight', 'MaxWidth', 'MaxHeight', 'Right');
+var
+  P: Integer;
+  Seg, Prefix: string;
+begin
+  P := Name.LastIndexOf('.');
+  Seg := Name.Substring(P + 1);
+  if P < 0 then
+    Prefix := ''
+  else
+    Prefix := Name.Substring(0, P);
+  if (Prefix = '') or SameText(Prefix, 'Margins') or SameText(Prefix, 'Padding') or SameText(Prefix, 'Constraints') then
+  begin
+    for P := Low(Last) to High(Last) do
+      if SameText(Seg, Last[P]) then
+        Exit(True);
+    Exit(SameText(Seg, 'ExplicitLeft') or SameText(Seg, 'ExplicitTop') or
+      SameText(Seg, 'ExplicitWidth') or SameText(Seg, 'ExplicitHeight'));
+  end;
+  // Font.Height, Style.Font.Height (DevExpress)...
+  Result := SameText(Seg, 'Height') and Prefix.EndsWith('Font', True);
+end;
+
+function PropIntValue(const Text: string; out V: Integer): Boolean;
+var
+  P: Integer;
+begin
+  P := Pos('=', Text);
+  Result := (P > 0) and TryStrToInt(Trim(Copy(Text, P + 1, MaxInt)), V);
+end;
+
+/// Valor inteiro vivo por caminho ('Margins.Left', 'Style.Font.Height').
+function LiveIntProp(Obj: TObject; const Path: string; out V: Integer): Boolean;
+var
+  Parts: TArray<string>;
+  I: Integer;
+  PI: PPropInfo;
+begin
+  Result := False;
+  Parts := Path.Split(['.']);
+  for I := 0 to High(Parts) do
+  begin
+    if Obj = nil then
+      Exit;
+    PI := GetPropInfo(Obj, Parts[I]);
+    if PI = nil then
+      Exit;
+    if I < High(Parts) then
+    begin
+      if PI.PropType^.Kind <> tkClass then
+        Exit;
+      Obj := GetObjectProp(Obj, PI);
+    end
+    else
+    begin
+      if not (PI.PropType^.Kind in [tkInteger]) then
+        Exit;
+      V := GetOrdProp(Obj, PI);
+      Result := True;
+    end;
+  end;
+end;
+
+/// Converte para o valor em execução as posições/tamanhos que mudaram no DFM:
+///   execução = novo × escala + (vivo − antigo × escala)
+/// A escala é o DPI atual sobre o de design (a VCL escala a tela ao carregar); a parcela entre
+/// parênteses é quanto o controle já estava deslocado do DFM (âncoras numa tela maximizada ou
+/// encaixada, alinhamento). Componente novo só recebe a escala.
+procedure AdjustToRuntime(Root: TComponent; OldTree, NewTree: TDfmNode; M, D: Integer);
+
+  procedure Walk(N: TDfmNode);
+  var
+    O, C: TDfmNode;
+    Comp: TComponent;
+    I, J, V, OV, Live, T: Integer;
+    P: TDfmProp;
+  begin
+    O := FindDfmNode(OldTree, N.Key);
+    if (O <> nil) and not SameText(O.TypeName, N.TypeName) then
+      O := nil;
+    Comp := nil;
+    if O <> nil then
+      Comp := FindComponentByKey(Root, N.Key);
+    for I := 0 to N.Props.Count - 1 do
+    begin
+      P := N.Props[I];
+      if not IsScaledProp(P.Name) or not PropIntValue(P.Text, V) then
+        Continue;
+      J := -1;
+      if O <> nil then
+      begin
+        J := O.IndexOfProp(P.Name);
+        if (J >= 0) and (O.Props[J].Text = P.Text) then
+          Continue; // não mudou: fica fora do delta
+      end;
+      T := MulDiv(V, M, D);
+      if (Comp <> nil) and (J >= 0) and PropIntValue(O.Props[J].Text, OV) and LiveIntProp(Comp, P.Name, Live) then
+        T := T + (Live - MulDiv(OV, M, D));
+      P.Text := P.Name + ' = ' + IntToStr(T);
+      N.Props[I] := P;
+    end;
+    for C in N.Children do
+      Walk(C);
+  end;
+
+begin
+  Walk(NewTree);
+end;
+
+/// DPI de design: o que o DFM grava (PixelsPerInch, telas antigas) ou 96.
+function DesignPPI(Tree: TDfmNode): Integer;
+var
+  J: Integer;
+begin
+  J := Tree.IndexOfProp('PixelsPerInch');
+  if (J < 0) or not PropIntValue(Tree.Props[J].Text, Result) or (Result <= 0) then
+    Result := 96;
+end;
+
 function TemplateFor(Comp: TComponent; IsRoot: Boolean; Cache: TObjectDictionary<TClass, TComponent>): TComponent;
 var
   C: TClass;
@@ -475,6 +601,11 @@ begin
     NewTree := ParseDfm(NewText);
     if not SameText(OldTree.TypeName, NewTree.TypeName) then
       raise EReadError.CreateFmt('o DFM agora é de %s, não de %s', [NewTree.TypeName, OldTree.TypeName]);
+    // ScaleFactor é o fator acumulado de design para execução (CurrentPPI nem sempre acompanha
+    // um ScaleForPPI); M/D reproduz o MulDiv que a VCL usa ao escalar.
+    if Root is TControl then
+      AdjustToRuntime(Root, OldTree, NewTree, Round(TControl(Root).ScaleFactor * DesignPPI(NewTree)),
+        DesignPPI(NewTree));
     Delta := BuildDfmDelta(OldTree, NewTree);
     if Delta.IsEmpty then
     begin

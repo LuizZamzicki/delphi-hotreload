@@ -183,6 +183,33 @@ begin
   end;
 end;
 
+procedure TestApplyScaled;
+var
+  F: TTestForm;
+  Base: string;
+  C: TComponent;
+begin
+  Writeln('Aplicar numa tela escalada (120 DPI, como no ERP a 125%)');
+  F := TTestForm.Create(nil);
+  try
+    DfmResourceText(TTestForm, Base);
+    F.ScaleForPPI(120);
+    Check(Abs(F.ScaleFactor - 1.25) < 0.001, 'tela escalada para 120 DPI (fator 1,25)');
+    Check(F.Button1.Width = 94, 'Button1 escalado ao carregar (75 -> 94)');
+    LogLines.Clear;
+    Check(ApplyDfmText(F, Base, DataText('uTestForm.v2.dfm'), CollectLog), 'base -> v2 aplicado');
+    // v2 põe o Button1 em 24,24 no Panel2: em 120 DPI isso é 30,30
+    Check((F.Button1.Left = 30) and (F.Button1.Top = 30),
+      Format('Button1 na posição escalada (30,30): %d,%d', [F.Button1.Left, F.Button1.Top]));
+    Check(F.Button1.Width = 94, 'largura que não mudou continua escalada');
+    C := F.FindComponent('CheckBox1');
+    Check((C is TCheckBox) and (TCheckBox(C).Left = 30) and (TCheckBox(C).Top = 125),
+      'componente novo também escalado (24,100 -> 30,125)');
+  finally
+    F.Free;
+  end;
+end;
+
 procedure Pump(Ms: Integer; const Done: TFunc<Boolean>);
 var
   T0: UInt64;
@@ -239,6 +266,7 @@ begin
     TestParser;
     TestDelta;
     TestApply;
+    TestApplyScaled;
     TestWatcher;
     Writeln('Classes');
     Check(FindComponentClassByName('TCheckBox') = TCheckBox, 'classe achada na varredura de VMTs');

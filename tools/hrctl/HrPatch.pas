@@ -38,7 +38,8 @@ function BuildPatch(const OldExe, NewExe, ObjDir: string; Since: TDateTime; Log:
 implementation
 
 uses
-  System.Generics.Collections, System.Generics.Defaults, System.IOUtils, System.NetEncoding, System.Math;
+  System.Generics.Collections, System.Generics.Defaults, System.IOUtils, System.NetEncoding, System.Math,
+  System.Diagnostics;
 
 { .map }
 
@@ -61,6 +62,7 @@ type
   private
     FSegBase: TDictionary<Integer, UInt32>;
     FSymKey: TDictionary<string, Integer>;
+    FModKey: TDictionary<string, Integer>;
   public
     ModSegs: TList<TModSeg>;
     Syms: TList<TMapSym>; // ordenados por VA
@@ -80,6 +82,7 @@ begin
   inherited;
   FSegBase := TDictionary<Integer, UInt32>.Create;
   FSymKey := TDictionary<string, Integer>.Create(TIStringComparer.Ordinal);
+  FModKey := TDictionary<string, Integer>.Create(TIStringComparer.Ordinal);
   ModSegs := TList<TModSeg>.Create;
   Syms := TList<TMapSym>.Create;
 end;
@@ -88,6 +91,7 @@ destructor TMapFile.Destroy;
 begin
   Syms.Free;
   ModSegs.Free;
+  FModKey.Free;
   FSymKey.Free;
   FSegBase.Free;
   inherited;
@@ -107,9 +111,10 @@ procedure TMapFile.Load(const FileName: string);
 type
   TPart = (pHeader, pDetail, pOther, pPublics);
 var
-  Lines: TStringList;
+  Reader: TStreamReader;
   L, T: string;
   Part: TPart;
+  Sorted: Boolean;
   Seg, I, J: Integer;
   Off: UInt32;
   Fields: TArray<string>;
@@ -118,13 +123,15 @@ var
   Counts: TDictionary<string, Integer>;
   Key: string;
 begin
-  Lines := TStringList.Create;
+  // Linha a linha: o .map do ERP passa de 50 MB e o hrctl é 32 bits.
+  Reader := TStreamReader.Create(FileName, TEncoding.ANSI, False, 1 shl 16);
   Counts := TDictionary<string, Integer>.Create(TIStringComparer.Ordinal);
+  Sorted := False;
   try
-    Lines.LoadFromFile(FileName);
     Part := pHeader;
-    for L in Lines do
+    while not Reader.EndOfStream do
     begin
+      L := Reader.ReadLine;
       T := Trim(L);
       if T.StartsWith('Detailed map of segments') then
       begin
@@ -134,6 +141,16 @@ begin
       if T.StartsWith('Address') and T.EndsWith('Publics by Value') then
       begin
         Part := pPublics;
+        if not Sorted then
+        begin
+          // ModSegAt usa busca binária; os símbolos guardam o índice já ordenado
+          ModSegs.Sort(TComparer<TModSeg>.Construct(
+            function(const A, B: TModSeg): Integer
+            begin
+              Result := CompareValue(A.Start, B.Start);
+            end));
+          Sorted := True;
+        end;
         Continue;
       end;
       if T.StartsWith('Address') or T.StartsWith('Line numbers') or T.StartsWith('Bound resource') then
@@ -180,6 +197,9 @@ begin
           end;
       end;
     end;
+    FModKey.Clear;
+    for I := 0 to ModSegs.Count - 1 do
+      FModKey.AddOrSetValue(ModSegs[I].Module + '|' + ModSegs[I].Cls + '|' + IntToStr(ModSegs[I].Ord), I);
     Syms.Sort(TComparer<TMapSym>.Construct(
       function(const A, B: TMapSym): Integer
       begin
@@ -199,17 +219,27 @@ begin
     end;
   finally
     Counts.Free;
-    Lines.Free;
+    Reader.Free;
   end;
 end;
 
 function TMapFile.ModSegAt(VA: UInt32): Integer;
 var
-  I: Integer;
+  Lo, Hi, Mid: Integer;
 begin
-  for I := 0 to ModSegs.Count - 1 do
-    if (VA >= ModSegs[I].Start) and (VA < ModSegs[I].Start + ModSegs[I].Len) then
-      Exit(I);
+  // ModSegs está ordenado por Start (ver Load); trechos não se sobrepõem
+  Lo := 0;
+  Hi := ModSegs.Count - 1;
+  while Lo <= Hi do
+  begin
+    Mid := (Lo + Hi) div 2;
+    if VA < ModSegs[Mid].Start then
+      Hi := Mid - 1
+    else if VA >= ModSegs[Mid].Start + ModSegs[Mid].Len then
+      Lo := Mid + 1
+    else
+      Exit(Mid);
+  end;
   Result := -1;
 end;
 
@@ -247,13 +277,9 @@ begin
 end;
 
 function TMapFile.FindModSeg(const Module, Cls: string; Ord: Integer): Integer;
-var
-  I: Integer;
 begin
-  for I := 0 to ModSegs.Count - 1 do
-    if SameText(ModSegs[I].Module, Module) and SameText(ModSegs[I].Cls, Cls) and (ModSegs[I].Ord = Ord) then
-      Exit(I);
-  Result := -1;
+  if not FModKey.TryGetValue(Module + '|' + Cls + '|' + IntToStr(Ord), Result) then
+    Result := -1;
 end;
 
 function TMapFile.ModuleSize(const Module, Cls: string): UInt32;
@@ -362,6 +388,8 @@ type
   end;
 
   TObjSection = class
+  private
+    FMask: TArray<Boolean>; // byte i é ponto de correção (montada na primeira consulta)
   public
     Name: string;
     Size: Integer;
@@ -401,11 +429,17 @@ end;
 function TObjSection.IsFixupByte(I: Integer): Boolean;
 var
   F: TObjFixup;
+  J: Integer;
 begin
-  for F in Fixups do
-    if (I >= F.Off) and (I < F.Off + 4) then
-      Exit(True);
-  Result := False;
+  // Há seções de dados com milhares de pontos: percorrer a lista a cada byte era quadrático.
+  if Length(FMask) <> Size then
+  begin
+    SetLength(FMask, Size);
+    for F in Fixups do
+      for J := F.Off to Min(F.Off + 3, Size - 1) do
+        FMask[J] := True;
+  end;
+  Result := (I >= 0) and (I < Size) and FMask[I];
 end;
 
 constructor TObjFile.Create;
@@ -425,7 +459,7 @@ const
   VirtBase = $4000; // índice dos segmentos virtuais (VIRDEF) no OMF da Borland
 var
   D: TBytes;
-  P, Len, I, Stop, SegIdx, Rec: Integer;
+  P, Len, I, Stop, SegIdx: Integer;
   Typ: Byte;
   Cur: TObjSection;
   CurOff: Integer;
@@ -485,7 +519,6 @@ begin
     P := 0;
     Cur := nil;
     CurOff := 0;
-    Rec := 0;
     while P + 3 <= Length(D) do
     begin
       Typ := D[P];
@@ -493,7 +526,6 @@ begin
       I := P + 3;
       Stop := P + 3 + Len - 1; // sem o checksum
       P := P + 3 + Len;
-      Inc(Rec);
       Is32 := Odd(Typ);
       case Typ of
         $B0: // VIRDEF: nome, tipo, segmento, tamanho
@@ -592,6 +624,7 @@ type
     function Translate(NewVA: UInt32; out OldVA: UInt32; out Why: string): Boolean;
     function TargetOf(S: TObjSection; const F: TObjFixup): UInt32;
     function IsRoutine(Obj: TObjFile; S: TObjSection): Boolean;
+    function FixupsPlausible(S: TObjSection; VA: UInt32): Boolean;
     procedure Place(Obj: TObjFile);
     function SameAsOld(S: TObjSection; out OldVA: UInt32): Boolean;
     procedure CheckData(Obj: TObjFile; S: TObjSection);
@@ -603,6 +636,8 @@ type
   end;
 
 constructor TPatchBuilder.Create(const OldExe, NewExe: string; Log: TStrings);
+var
+  SW: TStopwatch;
 begin
   inherited Create;
   FLog := Log;
@@ -610,10 +645,14 @@ begin
   FNewMap := TMapFile.Create;
   FOldPE := TPEFile.Create;
   FNewPE := TPEFile.Create;
+  SW := TStopwatch.StartNew;
   FOldMap.Load(ChangeFileExt(OldExe, '.map'));
   FNewMap.Load(ChangeFileExt(NewExe, '.map'));
+  FLog.Add(Format('  [tempo] .map: %d ms (%d símbolos)', [SW.ElapsedMilliseconds, FNewMap.Syms.Count]));
+  SW := TStopwatch.StartNew;
   FOldPE.Load(OldExe);
   FNewPE.Load(NewExe);
+  FLog.Add(Format('  [tempo] exes: %d ms', [SW.ElapsedMilliseconds]));
   FBlock := TBytesStream.Create;
   FFixups := TJSONArray.Create;
   FHooks := TJSONArray.Create;
@@ -718,9 +757,36 @@ begin
     SameText(S.Name, '@' + Obj.Module) or SameText(S.Name, '@Finalization') or (S.Size = 0));
 end;
 
+/// Seção pequena com muitos pontos de correção (ex.: trampolim "jmp [IAT]" de função externa,
+/// 6 bytes com 4 mascarados) casa em qualquer lugar só pelos bytes. Exige também que cada ponto
+/// aponte para dentro do exe novo.
+function TPatchBuilder.FixupsPlausible(S: TObjSection; VA: UInt32): Boolean;
+var
+  F: TObjFixup;
+  Site, V, T: UInt32;
+  O: Integer;
+begin
+  for F in S.Fixups do
+  begin
+    Site := VA + UInt32(F.Off);
+    O := FNewPE.Offset(Site);
+    if (O < 0) or (O + 4 > Length(FNewPE.Data)) then
+      Exit(False);
+    V := PCardinal(@FNewPE.Data[O])^;
+    if F.Rel then
+      T := UInt32(Int64(Site) + 4 + Int32(V))
+    else
+      T := V;
+    if FNewPE.SectionAt(T) < 0 then
+      Exit(False);
+  end;
+  Result := True;
+end;
+
 /// Acha cada seção do .obj no exe novo, na ordem, dentro dos trechos de código da unit.
 procedure TPatchBuilder.Place(Obj: TObjFile);
 var
+  First: Integer;
   Ranges: TList<Integer>;
   Cursor: TDictionary<Integer, UInt32>;
   S: TObjSection;
@@ -743,8 +809,14 @@ begin
     end;
     for S in Obj.Sections do
     begin
-      if S.Size = 0 then
+      // Só o que a montagem usa: rotinas (transplante) e VMT/RTTI (conferência). Bloco
+      // principal do .dpr, initialization e afins custariam uma varredura inteira à toa.
+      if (S.Size = 0) or not (IsRoutine(Obj, S) or S.Name.EndsWith('@') or S.Name.StartsWith('@$')) then
         Continue;
+      // primeiro byte que não é ponto de correção: filtro barato antes da comparação inteira
+      First := 0;
+      while (First < S.Size) and S.IsFixupByte(First) do
+        Inc(First);
       for MI in Ranges do
       begin
         M := FNewMap.ModSegs[MI];
@@ -754,6 +826,11 @@ begin
         begin
           O := FNewPE.Offset(VA);
           Ok := O >= 0;
+          if Ok and (First < S.Size) and (FNewPE.Data[O + First] <> S.Data[First]) then
+          begin
+            Inc(VA);
+            Continue;
+          end;
           I := 0;
           while Ok and (I < S.Size) do
           begin
@@ -761,7 +838,7 @@ begin
               Ok := False;
             Inc(I);
           end;
-          if Ok then
+          if Ok and FixupsPlausible(S, VA) then
           begin
             S.NewVA := VA;
             S.Placed := True;
@@ -977,6 +1054,7 @@ end;
 function BuildPatch(const OldExe, NewExe, ObjDir: string; Since: TDateTime; Log: TStrings): TJSONObject;
 var
   B: TPatchBuilder;
+  SW: TStopwatch;
   Objs: TObjectList<TObjFile>;
   Obj: TObjFile;
   F: string;
@@ -991,9 +1069,12 @@ begin
       begin
         Obj := TObjFile.Create;
         Objs.Add(Obj);
+        SW := TStopwatch.StartNew;
         Obj.Load(F);
-        Log.Add('unit ' + Obj.Module);
+        Log.Add(Format('unit %s (%d seções, .obj lido em %d ms)', [Obj.Module, Obj.Sections.Count, SW.ElapsedMilliseconds]));
+        SW := TStopwatch.StartNew;
         B.AddUnit(Obj);
+        Log.Add(Format('  [tempo] análise: %d ms', [SW.ElapsedMilliseconds]));
       end;
     B.Emit;
     Result := TJSONObject.Create;

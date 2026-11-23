@@ -14,7 +14,7 @@
     dump <form> [componente] [--binary]  DFM da tela VIVA (estado atual, não o do disco)
     get <form> <caminho>                 get FormMain btnOk.Caption  |  get FormMain Caption
     set <form> <caminho> <valor>
-    click <form> <componente>            TControl, TMenuItem ou TBasicAction
+    click <form> <componente>            TControl, TMenuItem, TBasicAction ou qualquer um com OnClick
     shot <form> <arquivo.png> [componente]
     reload <arquivo.dfm>                 aplica já e devolve o resultado
     open <TClasseForm>                   cria e mostra (Show) uma tela pela classe
@@ -44,8 +44,8 @@ implementation
 
 uses
   Winapi.Windows, System.SysUtils, System.Classes, System.JSON, System.TypInfo, System.Variants,
-  System.IOUtils, System.Types, Vcl.Controls, Vcl.Forms, Vcl.Graphics, Vcl.Menus, Vcl.StdCtrls,
-  Vcl.Imaging.pngimage, HotReload, HotReload.DfmModel, HotReload.DfmApply, HotReload.Patch;
+  System.IOUtils, System.StrUtils, System.Types, System.Generics.Collections, System.Generics.Defaults, System.DateUtils, Vcl.Controls, Vcl.Forms, Vcl.Graphics, Vcl.Menus, Vcl.StdCtrls,
+  Vcl.ExtCtrls, Vcl.Imaging.pngimage, HotReload, HotReload.DfmModel, HotReload.DfmApply, HotReload.Patch;
 
 type
   EControl = class(Exception);
@@ -65,6 +65,12 @@ type
   end;
 
   TControlAccess = class(TControl); // Click é protegido
+
+function ConvertStringSecurityDescriptorToSecurityDescriptorW(StringSecurityDescriptor: PWideChar;
+  StringSDRevision: DWORD; var SecurityDescriptor: Pointer; SecurityDescriptorSize: PULONG): BOOL; stdcall;
+  external advapi32 name 'ConvertStringSecurityDescriptorToSecurityDescriptorW';
+function ConvertSidToStringSidW(Sid: PSID; var StringSid: PWideChar): BOOL; stdcall;
+  external advapi32 name 'ConvertSidToStringSidW';
 
 function PrintWindow(Wnd: HWND; DC: HDC; Flags: UINT): BOOL; stdcall; external user32 name 'PrintWindow';
 
@@ -358,7 +364,8 @@ begin
     Key := Prefix + C.Name;
     if (C is TCustomMemo) and (GetPropInfo(C, 'Lines') <> nil) then
       Props.AddPair(Key + '.Lines', PropText(C, 'Lines'))
-    else if ((C is TCustomEdit) or (C is TCustomComboBox)) and (GetPropInfo(C, 'Text') <> nil) then
+    else if (C is TWinControl) and not (C is TButtonControl) and (GetPropInfo(C, 'Text') <> nil) then
+      // TEdit, TComboBox, TcxTextEdit, TcxComboBox...: o que foi digitado
       Props.AddPair(Key + '.Text', PropText(C, 'Text'));
     for P in StateProps do
       if GetPropInfo(C, P) <> nil then
@@ -371,6 +378,28 @@ end;
 function IsRestorable(F: TCustomForm): Boolean;
 begin
   Result := (F.Name <> '') and not F.ClassNameIs('TMessageForm');
+end;
+
+/// Tela encaixada (ManualDock) numa aba de outro form, como o ERP faz com as telas dentro do
+/// form principal: guarda onde estava, para encaixar igual na volta.
+procedure AddDockInfo(F: TCustomForm; O: TJSONObject);
+var
+  Site, Page: TWinControl;
+begin
+  Site := F.HostDockSite;
+  if (Site = nil) or (Site.Owner = nil) or (Site.Owner.Name = '') or (Site.Name = '') then
+    Exit;
+  O.AddPair('dockForm', Site.Owner.Name);
+  O.AddPair('dockSite', Site.Name);
+  Page := F.Parent;
+  if (Page = nil) or (Page = Site) then
+    Exit;
+  // O ERP guarda na aba o endereço do form (para fechar a aba certa); na volta, o novo.
+  O.AddPair('pageTagIsForm', TJSONBool.Create(Page.Tag = NativeInt(F)));
+  if GetPropInfo(Page, 'PageIndex') <> nil then
+    O.AddPair('pageIndex', TJSONNumber.Create(GetOrdProp(Page, 'PageIndex')));
+  if GetPropInfo(Site, 'ActivePage') <> nil then
+    O.AddPair('activePage', TJSONBool.Create(GetObjectProp(Site, 'ActivePage') = Page));
 end;
 
 procedure CmdSnapshot(const Args: TArray<string>; Resp: TJSONObject);
@@ -408,6 +437,7 @@ begin
       if (F.ActiveControl <> nil) and (F.ActiveControl.Owner = F) then
         Focus := F.ActiveControl.Name;
       O.AddPair('focus', Focus);
+      AddDockInfo(F, O);
       Props := TJSONObject.Create;
       O.AddPair('controls', Props);
       CollectState(F, '', Props);
@@ -446,6 +476,14 @@ begin
     begin
       Application.Terminate;
     end);
+  // Com uma tela modal aberta (um login, por exemplo), o Terminate só fecha o modal e o
+  // programa pode seguir adiante. Se em 5 s ainda estiver no ar, encerra o processo.
+  TThread.CreateAnonymousThread(
+    procedure
+    begin
+      Sleep(5000);
+      ExitProcess(0);
+    end).Start;
   Resp.AddPair('text', 'fechando');
 end;
 
@@ -471,15 +509,104 @@ var
   V: TJSONValue;
   Arr: TJSONArray;
   O: TJSONObject;
-  Pair: TJSONPair;
-  I, Failed: Integer;
+  I: Integer;
   F, Active: TCustomForm;
-  Obj: TObject;
-  Prop, Focus: string;
-  C: TComponent;
+  Docked: TList<TJSONObject>;
+  ActivePage: TWinControl;
+  ActiveSite: TWinControl;
+
+  function Open(O: TJSONObject): TCustomForm;
+  begin
+    try
+      Result := OpenFormForRestore(O.GetValue<string>('name'), O.GetValue<string>('class'));
+    except
+      on E: Exception do
+      begin
+        THotReload.AddLog(Format('restaurar %s: %s', [O.GetValue<string>('name'), E.Message]));
+        Result := nil;
+      end;
+    end;
+  end;
+
+  procedure ApplyControls(F: TCustomForm; O: TJSONObject);
+  var
+    Pair: TJSONPair;
+    Obj: TObject;
+    Prop, Focus: string;
+    C: TComponent;
+    Failed: Integer;
+  begin
+    Failed := 0;
+    for Pair in O.GetValue('controls') as TJSONObject do
+    try
+      ResolvePath(F, Pair.JsonString.Value, Obj, Prop);
+      SetPropText(F, Obj, Prop, Pair.JsonValue.Value);
+    except
+      Inc(Failed); // componente que saiu da tela ou mudou de tipo na versão nova
+    end;
+    Focus := O.GetValue<string>('focus');
+    if Focus <> '' then
+    begin
+      C := F.FindComponent(Focus);
+      if (C is TWinControl) and TWinControl(C).CanFocus then
+        F.ActiveControl := TWinControl(C);
+    end;
+    if Failed > 0 then
+      THotReload.AddLog(Format('restaurar %s: %d valor(es) não voltaram', [F.Name, Failed]));
+  end;
+
+  function FindSite(O: TJSONObject): TWinControl;
+  var
+    Host: TCustomForm;
+    C: TComponent;
+  begin
+    Result := nil;
+    try
+      Host := FindForm(O.GetValue<string>('dockForm'));
+    except
+      Exit;
+    end;
+    C := Host.FindComponent(O.GetValue<string>('dockSite'));
+    if C is TWinControl then
+      Result := TWinControl(C);
+  end;
+
+  /// Mesmo caminho do DockForm do ERP: ManualDock, maximiza, Show, Tag da aba, aba visível.
+  procedure Dock(F: TCustomForm; O: TJSONObject; Site: TWinControl);
+  var
+    Page: TWinControl;
+    Idx: Integer;
+  begin
+    F.ManualDock(Site, nil, alClient);
+    if O.GetValue<Boolean>('maximized') then
+      F.WindowState := wsMaximized;
+    F.Show;
+    Site.Visible := True;
+    Page := F.Parent;
+    if (Page = nil) or (Page = Site) then
+      Exit;
+    if O.GetValue<Boolean>('pageTagIsForm', False) then
+      Page.Tag := NativeInt(F);
+    Idx := O.GetValue<Integer>('pageIndex', -1);
+    if (Idx >= 0) and (GetPropInfo(Page, 'PageIndex') <> nil) then
+    try
+      SetOrdProp(Page, 'PageIndex', Idx);
+    except
+      // menos abas que antes: fica no fim
+    end;
+    if O.GetValue<Boolean>('activePage', False) then
+    begin
+      ActivePage := Page;
+      ActiveSite := Site;
+    end;
+  end;
+
 begin
   Result := 0;
   Active := nil;
+  ActivePage := nil;
+  ActiveSite := nil;
+  Docked := TList<TJSONObject>.Create;
   V := TJSONObject.ParseJSONValue(TFile.ReadAllText(FileName, TEncoding.UTF8));
   try
     if not (V is TJSONObject) then
@@ -487,53 +614,234 @@ begin
     Arr := TJSONObject(V).GetValue('forms') as TJSONArray;
     if Arr = nil then
       Exit;
-    // De trás para frente: a tela que estava por cima é a última a aparecer.
+    // 1. Janelas soltas, de trás para frente: a que estava por cima é a última a aparecer.
     for I := Arr.Count - 1 downto 0 do
     begin
       O := Arr.Items[I] as TJSONObject;
-      try
-        F := OpenFormForRestore(O.GetValue<string>('name'), O.GetValue<string>('class'));
-      except
-        on E: Exception do
-        begin
-          THotReload.AddLog(Format('restaurar %s: %s', [O.GetValue<string>('name'), E.Message]));
-          Continue;
-        end;
+      // Tela escondida não se recria: criar o form principal à mão, por exemplo, roda o
+      // OnCreate dele de novo. Tela modal (login, diálogo) é o próprio programa que abre.
+      if not O.GetValue<Boolean>('visible') then
+        Continue;
+      if O.GetValue<Boolean>('modal') then
+      begin
+        THotReload.AddLog(Format('restaurar %s: era modal, não reaberta', [O.GetValue<string>('name')]));
+        Continue;
       end;
-      if O.GetValue<Boolean>('visible') and not F.Visible then
+      if O.GetValue<string>('dockSite', '') <> '' then
+      begin
+        Docked.Add(O); // encaixadas depois, na ordem das abas
+        Continue;
+      end;
+      F := Open(O);
+      if F = nil then
+        Continue;
+      if not F.Visible then
         F.Show; // antes do SetBounds: poScreenCenter reposiciona ao mostrar
       F.SetBounds(O.GetValue<Integer>('left'), O.GetValue<Integer>('top'),
         O.GetValue<Integer>('width'), O.GetValue<Integer>('height'));
       if O.GetValue<Boolean>('maximized') then
         F.WindowState := wsMaximized;
-      Failed := 0;
-      for Pair in O.GetValue('controls') as TJSONObject do
-      try
-        ResolvePath(F, Pair.JsonString.Value, Obj, Prop);
-        SetPropText(F, Obj, Prop, Pair.JsonValue.Value);
-      except
-        Inc(Failed); // componente que saiu da tela ou mudou de tipo na versão nova
-      end;
-      Focus := O.GetValue<string>('focus');
-      if Focus <> '' then
-      begin
-        C := F.FindComponent(Focus);
-        if (C is TWinControl) and TWinControl(C).CanFocus then
-          F.ActiveControl := TWinControl(C);
-      end;
+      ApplyControls(F, O);
       if O.GetValue<Boolean>('active') then
         Active := F;
-      if O.GetValue<Boolean>('modal') then
-        THotReload.AddLog(Format('restaurar %s: era modal, reaberta com Show', [F.Name]));
-      if Failed > 0 then
-        THotReload.AddLog(Format('restaurar %s: %d valor(es) não voltaram', [F.Name, Failed]));
       Inc(Result);
     end;
+    // 2. Encaixadas em abas, na ordem em que as abas estavam.
+    Docked.Sort(TComparer<TJSONObject>.Construct(
+      function(const A, B: TJSONObject): Integer
+      begin
+        Result := A.GetValue<Integer>('pageIndex', MaxInt) - B.GetValue<Integer>('pageIndex', MaxInt);
+      end));
+    for O in Docked do
+    begin
+      F := Open(O);
+      if F = nil then
+        Continue;
+      if FindSite(O) <> nil then
+        Dock(F, O, FindSite(O))
+      else
+      begin
+        THotReload.AddLog(Format('restaurar %s: não achei %s.%s para encaixar; aberta solta',
+          [F.Name, O.GetValue<string>('dockForm'), O.GetValue<string>('dockSite')]));
+        F.Show;
+      end;
+      ApplyControls(F, O);
+      Inc(Result);
+    end;
+    if (ActiveSite <> nil) and (GetPropInfo(ActiveSite, 'ActivePage') <> nil) then
+      SetObjectProp(ActiveSite, 'ActivePage', ActivePage);
     if (Active <> nil) and Active.Visible then
       Active.BringToFront;
   finally
     V.Free;
+    Docked.Free;
   end;
+end;
+
+type
+  /// Espera o programa ficar pronto para reabrir as telas:
+  ///  - as telas que estavam abertas como modal no snapshot (o form principal do ERP roda
+  ///    com ShowModal) existem e estão visíveis de novo, o que no ERP só acontece depois do login;
+  ///  - nenhuma outra tela modal aberta (um login, um aviso);
+  ///  - tudo isso por 1,5 s seguidos.
+  /// As telas não modais não bloqueiam: é a própria restauração que vai abri-las (e o
+  /// programa pode ter criado algumas escondidas na partida).
+  /// Roda num timer, e não dentro de TThread.Queue: se uma tela reaberta abrir um modal, o
+  /// canal continua respondendo.
+  TRestorer = class(TComponent)
+  private
+    FFileName: string;
+    FTimer: TTimer;
+    FQuietSince: UInt64;
+    FWaitFor: TArray<string>; // 'Name|Classe' das telas visíveis no snapshot
+    FMustShow: TArray<string>; // ... e, delas, as que eram modais
+    function InSnapshot(F: TCustomForm): Boolean;
+    function UnexpectedModal: string;
+    function WaitingForm: string;
+    procedure Tick(Sender: TObject);
+  public
+    constructor Create(const AFileName: string); reintroduce;
+  end;
+
+var
+  GRestorer: TRestorer;
+
+constructor TRestorer.Create(const AFileName: string);
+var
+  V: TJSONValue;
+  Item: TJSONValue;
+  O: TJSONObject;
+begin
+  inherited Create(nil);
+  FFileName := AFileName;
+  try
+    V := TJSONObject.ParseJSONValue(TFile.ReadAllText(AFileName, TEncoding.UTF8));
+    try
+      if (V is TJSONObject) and (TJSONObject(V).GetValue('forms') is TJSONArray) then
+        for Item in TJSONArray(TJSONObject(V).GetValue('forms')) do
+        begin
+          O := Item as TJSONObject;
+          if O.GetValue<Boolean>('visible') then
+          begin
+            FWaitFor := FWaitFor + [O.GetValue<string>('name') + '|' + O.GetValue<string>('class')];
+            if O.GetValue<Boolean>('modal') then
+              FMustShow := FMustShow + [O.GetValue<string>('name') + '|' + O.GetValue<string>('class')];
+          end;
+        end;
+    finally
+      V.Free;
+    end;
+  except
+    FWaitFor := nil; // arquivo ruim: RestoreState reporta depois
+  end;
+  FTimer := TTimer.Create(Self);
+  FTimer.Interval := 300;
+  FTimer.OnTimer := Tick;
+end;
+
+function TRestorer.InSnapshot(F: TCustomForm): Boolean;
+var
+  W: string;
+  P: Integer;
+begin
+  for W in FWaitFor do
+  begin
+    P := Pos('|', W);
+    if SameText(F.Name, Copy(W, 1, P - 1)) or F.ClassNameIs(Copy(W, P + 1, MaxInt)) then
+      Exit(True);
+  end;
+  Result := False;
+end;
+
+/// Tela modal aberta que não estava aberta no snapshot (um login, um aviso). Modal que já
+/// estava lá (o form principal do ERP roda com ShowModal) não conta.
+function TRestorer.UnexpectedModal: string;
+var
+  I: Integer;
+  F: TCustomForm;
+begin
+  for I := 0 to Screen.CustomFormCount - 1 do
+  begin
+    F := Screen.CustomForms[I];
+    if F.Visible and (fsModal in F.FormState) and not InSnapshot(F) then
+      Exit(IfThen(F.Name <> '', F.Name, F.ClassName));
+  end;
+  Result := '';
+end;
+
+/// Primeira tela que era modal no snapshot e ainda não existe ou não está visível aqui.
+function TRestorer.WaitingForm: string;
+var
+  W: string;
+  P, I: Integer;
+  F: TCustomForm;
+  Visible: Boolean;
+begin
+  for W in FMustShow do
+  begin
+    P := Pos('|', W);
+    Visible := False;
+    for I := 0 to Screen.CustomFormCount - 1 do
+    begin
+      F := Screen.CustomForms[I];
+      if (SameText(F.Name, Copy(W, 1, P - 1)) or F.ClassNameIs(Copy(W, P + 1, MaxInt))) and F.Visible then
+      begin
+        Visible := True;
+        Break;
+      end;
+    end;
+    if not Visible then
+      Exit(Copy(W, 1, P - 1));
+  end;
+  Result := '';
+end;
+
+procedure TRestorer.Tick(Sender: TObject);
+var
+  N: Integer;
+  Waiting, Modal: string;
+begin
+  Waiting := WaitingForm;
+  Modal := UnexpectedModal;
+  if (Waiting <> '') or (Modal <> '') or (Screen.ActiveCustomForm = nil) then
+  begin
+    FQuietSince := 0;
+    if Modal <> '' then
+      GRestoreState := Format('aguardando: %s está aberta (ex.: login); as telas voltam depois dela', [Modal])
+    else if Waiting <> '' then
+      GRestoreState := Format('aguardando: %s ainda não apareceu (ex.: falta o login); as telas voltam depois', [Waiting])
+    else
+      GRestoreState := 'aguardando: nenhuma tela ativa';
+    Exit;
+  end;
+  if FQuietSince = 0 then
+    FQuietSince := GetTickCount64;
+  if GetTickCount64 - FQuietSince < 1500 then
+    Exit;
+  FTimer.Enabled := False;
+  try
+    N := RestoreState(FFileName);
+    GRestoreState := Format('restaurado: %d tela(s)', [N]);
+  except
+    on E: Exception do
+      GRestoreState := 'erro: ' + E.Message;
+  end;
+  System.SysUtils.DeleteFile(FFileName); // estado de um restart só vale uma vez
+  THotReload.AddLog(GRestoreState);
+  GRestorer := nil;
+  TThread.ForceQueue(nil,
+    procedure
+    begin
+      Free;
+    end);
+end;
+
+/// Onde o "hrctl restart" grava o estado. Serve quando o exe pede elevação: o Windows abre o
+/// processo elevado sem herdar o ambiente, e a variável HOTRELOAD_RESTORE se perde.
+function RestoreFileName: string;
+begin
+  Result := TPath.Combine(TPath.GetTempPath,
+    'hotreload-restore-' + ChangeFileExt(ExtractFileName(ParamStr(0)), '') + '.json');
 end;
 
 procedure RestoreFromEnvironment;
@@ -541,25 +849,15 @@ var
   FileName: string;
 begin
   FileName := GetEnvironmentVariable('HOTRELOAD_RESTORE');
+  if FileName <> '' then
+    SetEnvironmentVariable('HOTRELOAD_RESTORE', nil) // não passa para processos filhos
+  else if TFile.Exists(RestoreFileName) and
+    (SecondsBetween(Now, TFile.GetLastWriteTime(RestoreFileName)) <= 120) then
+    FileName := RestoreFileName; // recente: veio de um restart agora
   if FileName = '' then
     Exit;
-  SetEnvironmentVariable('HOTRELOAD_RESTORE', nil); // não passa para processos filhos
   GRestoreState := 'pendente';
-  // Enfileirado: roda quando o Application.Run começar, com o form principal já criado.
-  TThread.ForceQueue(nil,
-    procedure
-    var
-      N: Integer;
-    begin
-      try
-        N := RestoreState(FileName);
-        GRestoreState := Format('restaurado: %d tela(s)', [N]);
-      except
-        on E: Exception do
-          GRestoreState := 'erro: ' + E.Message;
-      end;
-      THotReload.AddLog(GRestoreState);
-    end);
+  GRestorer := TRestorer.Create(FileName);
 end;
 
 procedure CmdForms(Resp: TJSONObject);
@@ -578,6 +876,8 @@ begin
       if F.Visible then Flags := Flags + ' visível';
       if F = Screen.ActiveCustomForm then Flags := Flags + ' ativa';
       if fsModal in F.FormState then Flags := Flags + ' modal';
+      if (F.HostDockSite <> nil) and (F.HostDockSite.Owner <> nil) then
+        Flags := Flags + Format(' encaixada em %s.%s', [F.HostDockSite.Owner.Name, F.HostDockSite.Name]);
       if F.Name <> '' then
         L.Add(Format('%s: %s "%s"%s %dx%d', [F.Name, F.ClassName, F.Caption, Flags, F.Width, F.Height]))
       else // diálogos do MessageDlg/ShowMessage não têm Name: endereçar pela classe
@@ -645,7 +945,10 @@ begin
     else if Target is TMenuItem then
       TMenuItem(Target).Click
     else if Target is TBasicAction then
-      TBasicAction(Target).Execute;
+      TBasicAction(Target).Execute
+    else
+      // Botões de barra (DevExpress TdxBar...) e afins: dispara o OnClick publicado
+      TNotifyEvent(GetMethodProp(Target, 'OnClick'))(Target);
     THotReload.AddLog(Format('click em %s.%s: ok', [FormName, Key]));
   except
     on E: Exception do
@@ -668,8 +971,9 @@ begin
     if not TControl(C).Enabled then
       raise EControl.CreateFmt('%s está desabilitado', [Key]);
   end
-  else if not ((C is TMenuItem) or (C is TBasicAction)) then
-    raise EControl.CreateFmt('%s (%s) não é clicável', [Key, C.ClassName]);
+  else if not ((C is TMenuItem) or (C is TBasicAction) or
+    ((GetPropInfo(C, 'OnClick') <> nil) and (GetMethodProp(C, 'OnClick').Code <> nil))) then
+    raise EControl.CreateFmt('%s (%s) não é clicável (sem OnClick)', [Key, C.ClassName]);
   // Enfileirado: se o clique abrir um diálogo modal, a resposta não fica presa nele.
   TThread.ForceQueue(nil,
     procedure
@@ -980,19 +1284,60 @@ begin
   FlushFileBuffers(Pipe); // só desconecta depois que o cliente leu
 end;
 
+function CurrentUserSid: string;
+var
+  Token: THandle;
+  Buf: array[0..511] of Byte;
+  Len: DWORD;
+  S: PWideChar;
+begin
+  Result := '';
+  if not OpenProcessToken(GetCurrentProcess, TOKEN_QUERY, Token) then
+    Exit;
+  try
+    if GetTokenInformation(Token, TokenUser, @Buf, SizeOf(Buf), Len) and
+      ConvertSidToStringSidW(PTokenUser(@Buf)^.User.Sid, S) then
+    begin
+      Result := S;
+      LocalFree(HLOCAL(S));
+    end;
+  finally
+    CloseHandle(Token);
+  end;
+end;
+
 procedure TControlServer.Execute;
 var
   Pipe: THandle;
   Ov: TOverlapped;
   N: DWORD;
   Connected: Boolean;
-  Request, Response: string;
+  Request, Response, Sddl, Sid: string;
+  SD: Pointer;
+  SA: TSecurityAttributes;
+  PSA: PSecurityAttributes;
 begin
   NameThreadForDebugging('HotReload.Control');
+  // Exe que pede elevação (manifesto requireAdministrator) criaria o pipe só para
+  // administradores, e o hrctl sem elevação levaria "acesso negado". Libera o próprio usuário.
+  SD := nil;
+  PSA := nil;
+  Sddl := 'D:(A;;GA;;;SY)(A;;GA;;;BA)';
+  Sid := CurrentUserSid;
+  if Sid <> '' then
+    Sddl := Sddl + '(A;;GA;;;' + Sid + ')';
+  if ConvertStringSecurityDescriptorToSecurityDescriptorW(PWideChar(Sddl), 1, SD, nil) then
+  begin
+    SA.nLength := SizeOf(SA);
+    SA.lpSecurityDescriptor := SD;
+    SA.bInheritHandle := False;
+    PSA := @SA;
+  end;
+  try
   while not Terminated do
   begin
     Pipe := CreateNamedPipe(PChar(ControlPipeName), PIPE_ACCESS_DUPLEX or FILE_FLAG_OVERLAPPED,
-      PIPE_TYPE_MESSAGE or PIPE_READMODE_MESSAGE or PIPE_WAIT, PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, nil);
+      PIPE_TYPE_MESSAGE or PIPE_READMODE_MESSAGE or PIPE_WAIT, PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, PSA);
     if Pipe = INVALID_HANDLE_VALUE then
     begin
       Response := SysErrorMessage(GetLastError);
@@ -1030,6 +1375,10 @@ begin
       DisconnectNamedPipe(Pipe);
       CloseHandle(Pipe);
     end;
+  end;
+  finally
+    if SD <> nil then
+      LocalFree(HLOCAL(SD));
   end;
 end;
 

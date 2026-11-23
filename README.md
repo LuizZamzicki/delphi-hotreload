@@ -122,6 +122,58 @@ alteradas muda. No demo, o ciclo leva cerca de 1 s.
 - O código de `initialization` não roda de novo.
 - Com o depurador da IDE ligado, o `INT3` para no depurador.
 
+## Para humanos: `hrctl watch`
+
+O exe abre sozinho o console do `watch` quando inicia, desde que exista um `hotreload.ini` ao
+lado dele com `auto=1`. O do demo é `demo\hotreload.ini`, copiado para `demo\bin` pelo build; o
+do ERP é gerado pelo `setup_hr.py`. Assim funciona do mesmo jeito abrindo pela IDE, por duplo
+clique ou depois de um `restart`.
+
+- Há um `watch` por pasta (mutex): se já houver um aberto, o exe não abre outro.
+- `HOTRELOAD_NOWATCH=1` no ambiente desliga a abertura automática. Agentes devem usar isso:
+  senão, o `watch` aplicaria patch sozinho enquanto o agente edita.
+- Sem o `.ini`, `build\dev-demo.bat` faz o mesmo à mão.
+
+O console vigia o fonte:
+
+- `.dfm` salvo: o próprio exe aplica na tela aberta (nível 1).
+- `.pas` salvo: roda o `patch` sozinho e mostra uma linha colorida:
+  - verde: código trocado sem reiniciar;
+  - vermelho: não compilou, e nada foi aplicado;
+  - amarelo: a mudança mexe em estrutura, aperte **R** para reiniciar (as telas voltam abertas).
+- Teclas: **P** = patch agora, **R** = reiniciar, **Q** = sair. Com `--auto-restart`, a mudança
+  estrutural reinicia sem perguntar.
+
+Agentes não usam o `watch`: chamam `patch`, `restart` e os outros comandos direto, e leem o código
+de saída.
+
+## Exe que pede elevação (manifesto `requireAdministrator`)
+
+O ERP roda como administrador. Para o `hrctl`, que roda sem elevação, funcionar com ele:
+
+- o pipe é criado liberando o próprio usuário (sem isso, "acesso negado");
+- o `restart` abre o exe novo pelo `ShellExecuteEx` quando o `CreateProcess` responde "elevação
+  necessária";
+- o estado vai por um arquivo no `%TEMP%`, porque o processo elevado não herda o ambiente.
+
+## Restauração depois de um login
+
+O `restart` só reabre as telas quando o programa está pronto:
+
+- as telas que eram modais no snapshot voltaram (o form principal do ERP roda com `ShowModal` e
+  só aparece depois do login);
+- não há outra tela modal aberta (um login, um aviso).
+
+Telas encaixadas em abas (`ManualDock`, como o ERP faz no `pg_principal`) voltam encaixadas, pelo
+mesmo caminho do `DockForm` do ERP: `ManualDock`, maximizar e `Show`. Depois o `Tag` da aba é
+corrigido para o endereço novo do form, e a ordem das abas e a aba ativa são recolocadas. O
+`hrctl forms` mostra `encaixada em Form.Controle`.
+
+Antes disso, o `ping` mostra `aguardando: ...`. Telas escondidas e modais não são recriadas, porque
+quem abre essas é o próprio programa. Os campos restaurados são os de qualquer controle de edição
+(`Text`, inclusive DevExpress), mais checkboxes, abas e posição. Controles ligados a banco ficam de
+fora.
+
 ## Pastas
 
 - `src\`: biblioteca (`HotReload`, `HotReload.DfmModel`, `HotReload.DfmApply`, `HotReload.Control`, `HotReload.Patch`)

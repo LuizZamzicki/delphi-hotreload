@@ -46,7 +46,7 @@ type
 implementation
 
 uses
-  Winapi.Windows, System.Generics.Collections, System.Generics.Defaults,
+  Winapi.Windows, System.Generics.Collections, System.Generics.Defaults, System.IniFiles,
   Vcl.Forms, Vcl.ExtCtrls, HotReload.DfmModel, HotReload.DfmApply, HotReload.Control;
 
 type
@@ -508,6 +508,96 @@ begin
   end;
 end;
 
+{ Console do hrctl watch }
+
+/// Mesmo nome que o hrctl watch cria (NomeMutexWatch no hrctl.dpr).
+function WatchMutexName(const Dir: string): string;
+var
+  C: Char;
+begin
+  Result := 'Local\hrctl-watch-';
+  for C in LowerCase(ExcludeTrailingPathDelimiter(Dir)) do
+    if CharInSet(C, ['a'..'z', '0'..'9']) then
+      Result := Result + C
+    else
+      Result := Result + '_';
+end;
+
+(* Abre o console do "hrctl watch" (modo para humanos) quando há um hotreload.ini ao lado do
+   exe com auto=1, a menos que já haja um vigiando a mesma pasta ou que HOTRELOAD_NOWATCH esteja
+   definida (agentes: o watch aplicaria patch sozinho enquanto o agente edita). Caminhos
+   relativos valem a partir da pasta do exe.
+
+     [watch]
+     auto=1
+     hrctl=C:\Projetos Loja\hotreload\tools\hrctl\bin\hrctl.exe
+     dir=C:\fonte\do\projeto
+     patch_build=C:\...\patch.bat
+     new=C:\...\patch\Projeto.exe
+     build=C:\...\make.bat
+     auto_restart=0 *)
+procedure StartWatchConsole;
+var
+  Ini: TIniFile;
+  ExeDir, Hrctl, Dir, Cmd: string;
+  M: THandle;
+  SI: TStartupInfo;
+  PI: TProcessInformation;
+
+  function Full(const S: string): string;
+  begin
+    if S = '' then
+      Result := ''
+    else if ExtractFileDrive(S) <> '' then
+      Result := S
+    else
+      Result := ExpandFileName(ExeDir + S);
+  end;
+
+begin
+  if GetEnvironmentVariable('HOTRELOAD_NOWATCH') <> '' then
+    Exit;
+  ExeDir := ExtractFilePath(ParamStr(0));
+  if not FileExists(ExeDir + 'hotreload.ini') then
+    Exit;
+  Ini := TIniFile.Create(ExeDir + 'hotreload.ini');
+  try
+    if not Ini.ReadBool('watch', 'auto', False) then
+      Exit;
+    Hrctl := Full(Ini.ReadString('watch', 'hrctl', ''));
+    Dir := ExcludeTrailingPathDelimiter(Full(Ini.ReadString('watch', 'dir', '')));
+    Cmd := Format('"%s" watch --dir "%s" --patch-build "%s" --new "%s" --build "%s"',
+      [Hrctl, Dir, Full(Ini.ReadString('watch', 'patch_build', '')),
+       Full(Ini.ReadString('watch', 'new', '')), Full(Ini.ReadString('watch', 'build', ''))]);
+    if Ini.ReadBool('watch', 'auto_restart', False) then
+      Cmd := Cmd + ' --auto-restart';
+  finally
+    Ini.Free;
+  end;
+  if not FileExists(Hrctl) or not DirectoryExists(Dir) then
+  begin
+    Log('hotreload.ini: hrctl ou dir não existe; console do watch não aberto');
+    Exit;
+  end;
+  M := OpenMutex(SYNCHRONIZE, False, PChar(WatchMutexName(Dir)));
+  if M <> 0 then
+  begin
+    CloseHandle(M); // já tem um watch (o restart reabre o exe com ele aberto)
+    Exit;
+  end;
+  FillChar(SI, SizeOf(SI), 0);
+  SI.cb := SizeOf(SI);
+  UniqueString(Cmd);
+  if CreateProcess(nil, PChar(Cmd), nil, nil, False, CREATE_NEW_CONSOLE, nil, PChar(Dir), SI, PI) then
+  begin
+    CloseHandle(PI.hThread);
+    CloseHandle(PI.hProcess);
+    Log('console do hrctl watch aberto');
+  end
+  else
+    Log('não consegui abrir o hrctl watch: ' + SysErrorMessage(GetLastError));
+end;
+
 { THotReload }
 
 class procedure THotReload.Start(const Dirs: array of string);
@@ -537,6 +627,7 @@ begin
     else
       Log('pasta não existe: ' + Full);
   end;
+  StartWatchConsole;
 end;
 
 class procedure THotReload.Stop;
