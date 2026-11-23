@@ -5,6 +5,7 @@ uses
   System.SysUtils,
   HotReload.DfmModel in '..\src\HotReload.DfmModel.pas',
   HotReload.DfmApply in '..\src\HotReload.DfmApply.pas',
+  HotReload.Patch in '..\src\HotReload.Patch.pas',
   HotReload.Control in '..\src\HotReload.Control.pas',
   HotReload in '..\src\HotReload.pas',
   uMain in 'uMain.pas' {FormMain},

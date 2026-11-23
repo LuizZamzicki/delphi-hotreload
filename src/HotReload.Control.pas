@@ -22,6 +22,8 @@
     log [desde]                          linhas de log depois do número "desde"
     snapshot <arquivo.json>              salva telas abertas e o que foi digitado nelas
     quit                                 fecha o exe (Application.Terminate)
+    patch <json> [--int3]                aplica um patch de código (nível 3, montado pelo hrctl)
+    unpatch                              desfaz os patches de código
 
   <form> é o Name ou a classe da tela, ou "active".
 
@@ -43,7 +45,7 @@ implementation
 uses
   Winapi.Windows, System.SysUtils, System.Classes, System.JSON, System.TypInfo, System.Variants,
   System.IOUtils, System.Types, Vcl.Controls, Vcl.Forms, Vcl.Graphics, Vcl.Menus, Vcl.StdCtrls,
-  Vcl.Imaging.pngimage, HotReload, HotReload.DfmModel, HotReload.DfmApply;
+  Vcl.Imaging.pngimage, HotReload, HotReload.DfmModel, HotReload.DfmApply, HotReload.Patch;
 
 type
   EControl = class(Exception);
@@ -320,8 +322,8 @@ end;
 
 procedure CmdPing(Resp: TJSONObject);
 begin
-  Resp.AddPair('text', Format('pid %d  %s'#13#10'pipe %s'#13#10'vigiando: %s'#13#10'restauração: %s'#13#10,
-    [GetCurrentProcessId, ParamStr(0), ControlPipeName, string.Join('; ', THotReload.WatchedDirs), GRestoreState]));
+  Resp.AddPair('text', Format('pid %d  %s'#13#10'pipe %s'#13#10'vigiando: %s'#13#10'restauração: %s'#13#10'patch de código: %d gancho(s)'#13#10,
+    [GetCurrentProcessId, ParamStr(0), ControlPipeName, string.Join('; ', THotReload.WatchedDirs), GRestoreState, ActiveHooks]));
   // Campos para o "hrctl restart" reabrir o exe do mesmo jeito.
   Resp.AddPair('pid', TJSONNumber.Create(GetCurrentProcessId));
   Resp.AddPair('exe', ParamStr(0));
@@ -415,6 +417,26 @@ begin
   finally
     Root.Free;
   end;
+end;
+
+procedure CmdPatch(const Args: TArray<string>; Resp: TJSONObject);
+var
+  L: TStringList;
+  Summary: string;
+begin
+  L := TStringList.Create;
+  try
+    Summary := ApplyPatch(Arg(Args, 0, 'json'), HasFlag(Args, '--int3'), L);
+    THotReload.AddLog('patch de código: ' + Summary);
+    Resp.AddPair('text', Summary + #13#10 + L.Text);
+  finally
+    L.Free;
+  end;
+end;
+
+procedure CmdUnpatch(Resp: TJSONObject);
+begin
+  Resp.AddPair('text', Format('%d gancho(s) desfeito(s)', [RevertPatches]));
 end;
 
 procedure CmdQuit(Resp: TJSONObject);
@@ -814,6 +836,8 @@ begin
   else if Cmd = 'log' then CmdLog(Args, Resp)
   else if Cmd = 'snapshot' then CmdSnapshot(Args, Resp)
   else if Cmd = 'quit' then CmdQuit(Resp)
+  else if Cmd = 'patch' then CmdPatch(Args, Resp)
+  else if Cmd = 'unpatch' then CmdUnpatch(Resp)
   else
     raise EControl.CreateFmt('comando desconhecido: "%s"', [Cmd]);
 end;

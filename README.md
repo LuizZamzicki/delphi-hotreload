@@ -9,7 +9,7 @@ Mudar a aplicação **com ela rodando**, sem fechar o exe e sem perder o estado 
 | 1 | Layout (`.dfm`): salvou na IDE, a tela aberta muda | **pronto** |
 | 1.5 | Canal de controle para agentes (`hrctl`): ver, conferir e mexer na tela viva | **pronto** |
 | 2 | Código (`.pas`) com reinício rápido: `hrctl restart` compila, reabre o exe e volta nas mesmas telas | **pronto** |
-| 3 | Código (`.pas`) sem reiniciar: compila a unit com `-J` (`.obj`), liga os símbolos aos endereços do exe vivo pelo `.map` (`-GD`) e desvia os métodos antigos com `JMP` | a fazer |
+| 3 | Código (`.pas`) sem reiniciar: `hrctl patch` troca o corpo das rotinas alteradas no exe vivo | **pronto** |
 
 ## Nível 1: como usar
 
@@ -82,9 +82,49 @@ Ciclo típico de um ajuste de layout: editar o `.dfm` → `hrctl reload uX.dfm` 
 para conferir em texto → `shot` só se a parte visual importar. Hot reload serve para iterar; no fim,
 compilar de verdade e conferir numa carga limpa da tela.
 
+## Nível 3: trocar código sem reiniciar (`patch`)
+
+```
+hrctl patch --build "build\patch-demo.bat" --new demo\bin\patch\HotDemo.exe
+```
+
+O exe continua no ar, com as mesmas telas, objetos e variáveis globais: só o código das rotinas
+alteradas muda. No demo, o ciclo leva cerca de 1 s.
+
+**Build** (`build\patch-demo.bat`): em outra pasta, porque o exe vivo não pode ser sobrescrito.
+1. `dcc32 -J` recompila só as units alteradas e grava `.dcu` e `.obj` (com `-J` ele não linka).
+2. `dcc32` normal na mesma pasta só linka o exe e o `.map` (`-GD`).
+
+**Análise** (`tools\hrctl\HrPatch.pas`), para cada `.obj` mais novo que o exe vivo:
+- O `.obj` (OMF da Borland, um "segmento virtual" por rotina, VMT ou typeinfo) diz onde estão os
+  pontos de correção de cada rotina, inclusive os `call`/`jmp` relativos, sem desmontar x86.
+- Cada rotina é localizada no exe novo e o alvo de cada ponto é lido lá, já resolvido. Os nomes do
+  `.obj` são curtos e ambíguos, então não servem para isso.
+- O alvo é traduzido para o exe vivo pelos dois `.map`: unit + nome + ordem de ocorrência +
+  deslocamento. Os dois saem do mesmo fonte, então overloads se casam pela ordem.
+- Rotina idêntica à antiga (mesmos bytes e mesmos alvos) fica de fora; só as alteradas vão.
+- VMT, RTTI e globais da unit precisam estar iguais ao exe vivo. Se não estiverem, o comando
+  recusa com código 5 e manda usar `restart`.
+
+**Aplicação** (`src\HotReload.Patch.pas`, dentro do exe):
+1. Aloca memória executável, copia as rotinas novas e corrige os endereços.
+2. Troca os 5 primeiros bytes de cada rotina antiga por um `JMP` para a nova. Rotina antiga com
+   menos de 5 bytes recebe um `INT3`, e um tratador de exceção vetorizado desvia a execução
+   (`--int3` força esse caminho, para teste).
+3. O patch é cumulativo em relação ao exe original: cada `patch` desfaz os ganchos anteriores
+   antes de aplicar os novos, então voltar o fonte e rodar `patch` de novo restaura o código
+   original. `hrctl unpatch` desfaz tudo.
+
+**Limites:**
+- Só serve para mudança no corpo de rotinas.
+- Exigem `restart`: campo novo, método virtual novo, mudança no que é `published`, variável global
+  nova e unit nova.
+- O código de `initialization` não roda de novo.
+- Com o depurador da IDE ligado, o `INT3` para no depurador.
+
 ## Pastas
 
-- `src\`: biblioteca (`HotReload`, `HotReload.DfmModel`, `HotReload.DfmApply`, `HotReload.Control`)
+- `src\`: biblioteca (`HotReload`, `HotReload.DfmModel`, `HotReload.DfmApply`, `HotReload.Control`, `HotReload.Patch`)
 - `tools\hrctl\`: CLI para agentes (`build\build-hrctl.bat`)
 - `demo\`: app de exemplo (`build\build-demo.bat` gera `demo\bin\HotDemo.exe`)
 - `tests\`: testes automáticos (`build\build-tests.bat` compila e roda)

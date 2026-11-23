@@ -20,9 +20,18 @@ implementation
 
 {$R *.dfm}
 
+var
+  Cliques: Integer; // estado global: precisa sobreviver a um patch de código (nível 3)
+
+function Passo: Integer;
+begin
+  Result := 1;
+end;
+
 procedure TFormSecond.btnOkClick(Sender: TObject);
 begin
-  ShowMessage('Olá, ' + edtNome.Text);
+  Inc(Cliques, Passo);
+  ShowMessage(Format('Olá, %s (%d)', [edtNome.Text, Cliques]));
 end;
 
 procedure TFormSecond.FormClose(Sender: TObject; var Action: TCloseAction);

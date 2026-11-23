@@ -13,6 +13,7 @@ uses
   Vcl.ExtCtrls,
   HotReload.DfmModel in '..\src\HotReload.DfmModel.pas',
   HotReload.DfmApply in '..\src\HotReload.DfmApply.pas',
+  HotReload.Patch in '..\src\HotReload.Patch.pas',
   HotReload.Control in '..\src\HotReload.Control.pas',
   HotReload in '..\src\HotReload.pas',
   uTestForm in 'uTestForm.pas' {TestForm};

@@ -8,7 +8,8 @@ uses
   System.SysUtils,
   System.Classes,
   System.IOUtils,
-  System.JSON;
+  System.JSON,
+  HrPatch in 'HrPatch.pas';
 
 const
   PIPE_PREFIX = '\\.\pipe\';
@@ -41,11 +42,17 @@ begin
   Writeln('  restart --build "<comando>"     recompila e reabre o exe nas mesmas telas;');
   Writeln('                                  se o build falhar, o exe antigo continua rodando');
   Writeln('                                  (o comando pode vir de HOTRELOAD_BUILD)');
+  Writeln('  patch --build "<comando>" --new <exe novo> [--int3]');
+  Writeln('                                  troca o codigo das rotinas alteradas SEM reiniciar;');
+  Writeln('                                  o build precisa gerar exe, .map e .obj (-J) em outra pasta');
+  Writeln('                                  (HOTRELOAD_PATCH_BUILD / HOTRELOAD_PATCH_EXE)');
+  Writeln('  unpatch                         desfaz os patches de codigo');
   Writeln('opcoes:');
   Writeln('  --pid N       escolhe o exe pelo PID quando ha varios');
   Writeln('  --timeout MS  tempo maximo total (padrao 15000)');
   Writeln('  --json        imprime a resposta JSON crua');
-  Writeln('saida: 0 ok, 1 erro do servidor, 2 pipe nao encontrado, 3 timeout, 4 build falhou');
+  Writeln('saida: 0 ok, 1 erro do servidor, 2 pipe nao encontrado, 3 timeout, 4 build falhou,');
+  Writeln('       5 mudanca que exige reiniciar (use restart)');
 end;
 
 function ListarPipes: TArray<string>;
@@ -481,9 +488,84 @@ begin
   end;
 end;
 
+{ patch (nível 3) }
+
+procedure AplicarPatch(const Comando: string; NovoExe: string; Int3: Boolean);
+var
+  Pipe, Exe, Payload: string;
+  Info, P: TJSONObject;
+  Saida, Log: TStringList;
+  Codigo: Integer;
+  T0, T1: UInt64;
+begin
+  if Comando = '' then
+    Falha('erro: passe --build "<comando>" ou defina HOTRELOAD_PATCH_BUILD', 1);
+  if NovoExe = '' then
+    Falha('erro: passe --new <exe novo> ou defina HOTRELOAD_PATCH_EXE', 1);
+  NovoExe := ExpandFileName(NovoExe);
+  Pipe := EscolherPipe;
+  Info := Pedir(Pipe, 'ping', []);
+  try
+    Exe := Info.GetValue<string>('exe');
+  finally
+    Info.Free;
+  end;
+  if SameText(NovoExe, Exe) then
+    Falha('erro: o exe novo precisa sair em outra pasta (o que esta rodando nao pode ser sobrescrito)', 1);
+
+  T0 := GetTickCount64;
+  Saida := TStringList.Create;
+  try
+    Codigo := RodarBuild(Comando, Saida);
+    if (Codigo <> 0) or not FileExists(NovoExe) then
+    begin
+      Writeln(Format('build falhou (codigo %d); nada foi aplicado, o exe continua como estava', [Codigo]));
+      MostrarErrosDoBuild(Saida);
+      Halt(4);
+    end;
+  finally
+    Saida.Free;
+  end;
+  T1 := GetTickCount64;
+
+  Log := TStringList.Create;
+  try
+    try
+      P := BuildPatch(Exe, NovoExe, ExtractFileDir(NovoExe), TFile.GetLastWriteTime(Exe), Log);
+    except
+      on E: EPatch do
+      begin
+        Write(Log.Text);
+        Writeln('nao da para trocar sem reiniciar: ' + E.Message);
+        Writeln('use: hrctl restart --build "<build normal>"');
+        Halt(5);
+      end;
+    end;
+    Write(Log.Text);
+  finally
+    Log.Free;
+  end;
+  try
+    Payload := P.ToJSON;
+  finally
+    P.Free;
+  end;
+  if Int3 then
+    Info := Pedir(Pipe, 'patch', [Payload, '--int3'])
+  else
+    Info := Pedir(Pipe, 'patch', [Payload]);
+  try
+    Write(Info.GetValue<string>('text', ''));
+  finally
+    Info.Free;
+  end;
+  Writeln(Format('patch aplicado (build %.1f s, total %.1f s)', [(T1 - T0) / 1000, (GetTickCount64 - T0) / 1000]));
+end;
+
 var
   I: Integer;
-  A, Cmd, Build: string;
+  A, Cmd, Build, NovoExe: string;
+  Int3: Boolean;
   Args: TStringList;
   Req: TJSONObject;
   Arr: TJSONArray;
@@ -515,6 +597,13 @@ begin
       Inc(I);
       Build := ParamStr(I);
     end
+    else if SameText(A, '--new') and (I < ParamCount) then
+    begin
+      Inc(I);
+      NovoExe := ParamStr(I);
+    end
+    else if SameText(A, '--int3') then
+      Int3 := True
     else
       Args.Add(A);
     Inc(I);
@@ -545,6 +634,15 @@ begin
     if Build = '' then
       Build := GetEnvironmentVariable('HOTRELOAD_BUILD');
     Reiniciar(Build);
+    Halt(0);
+  end;
+  if SameText(Cmd, 'patch') then
+  begin
+    if Build = '' then
+      Build := GetEnvironmentVariable('HOTRELOAD_PATCH_BUILD');
+    if NovoExe = '' then
+      NovoExe := GetEnvironmentVariable('HOTRELOAD_PATCH_EXE');
+    AplicarPatch(Build, NovoExe, Int3);
     Halt(0);
   end;
 
