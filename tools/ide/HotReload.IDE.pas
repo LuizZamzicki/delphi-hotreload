@@ -17,8 +17,8 @@
 
   A pasta do hot reload (onde ficam src\ e tools\hrctl\bin\hrctl.exe) vem do registro
   HKCU\Software\HotReloadIDE\Home, gravado pelo build\build-ide.bat (a IDE costuma carregar o
-  .bpl de uma cópia na pasta Bpl padrão, longe do repositório). Sem ele, tenta a pasta do .bpl e
-  C:\Projetos Loja\hotreload; o menu "Pasta do hot reload..." escolhe à mão.
+  .bpl de uma cópia na pasta Bpl padrão, longe do repositório). Sem ele, tenta a pasta do .bpl;
+  o menu "Pasta do hot reload..." escolhe à mão.
 *)
 
 interface
@@ -368,8 +368,6 @@ begin
   end;
   if not IsHome(Result) then
     Result := ExpandFileName(ExtractFilePath(GetModuleName(HInstance)) + '..\..\..'); // <repo>\tools\ide\bin
-  if not IsHome(Result) then
-    Result := 'C:\Projetos Loja\hotreload';
   if IsHome(Result) then
     Result := IncludeTrailingPathDelimiter(Result)
   else

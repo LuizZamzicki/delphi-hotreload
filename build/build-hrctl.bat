@@ -1,6 +1,6 @@
 @echo off
 setlocal
-call "C:\Program Files (x86)\Embarcadero\Studio\23.0\bin\rsvars.bat" >nul
+call "%~dp0env.bat" || exit /b 1
 cd /d "%~dp0..\tools\hrctl"
 if not exist bin mkdir bin
 if not exist dcu mkdir dcu

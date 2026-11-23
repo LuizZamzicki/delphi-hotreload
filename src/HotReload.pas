@@ -10,7 +10,7 @@
 
   Uso, no .dpr, depois de criar o form principal:
     {$IFDEF DEBUG}
-    THotReload.Start(['C:\Projetos Loja\MeuProjeto']);
+    THotReload.Start(['C:\Fontes\MeuProjeto']);
     {$ENDIF}
   Sem pastas, usa a variável de ambiente HOTRELOAD_DIRS (separadas por ";").
 *)
@@ -530,7 +530,7 @@ end;
 
      [watch]
      auto=1
-     hrctl=C:\Projetos Loja\hotreload\tools\hrctl\bin\hrctl.exe
+     hrctl=C:\delphi-hotreload\tools\hrctl\bin\hrctl.exe
      dir=C:\fonte\do\projeto
      patch_build=C:\...\patch.bat
      new=C:\...\patch\Projeto.exe

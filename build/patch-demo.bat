@@ -3,7 +3,7 @@ setlocal
 rem Build do patch de codigo (nivel 3): exe novo, .map e .obj em demo\bin\patch, sem tocar no exe vivo.
 rem 1) -J recompila so as units alteradas e grava .dcu + .obj (com -J o dcc32 nao linka o exe)
 rem 2) build normal na mesma pasta: os .dcu ja estao em dia, so linka exe + .map
-call "C:\Program Files (x86)\Embarcadero\Studio\23.0\bin\rsvars.bat" >nul
+call "%~dp0env.bat" || exit /b 1
 cd /d "%~dp0..\demo"
 if not exist bin\patch mkdir bin\patch
 if not exist dcu mkdir dcu

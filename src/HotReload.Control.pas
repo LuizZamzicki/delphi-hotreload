@@ -380,8 +380,8 @@ begin
   Result := (F.Name <> '') and not F.ClassNameIs('TMessageForm');
 end;
 
-/// Tela encaixada (ManualDock) numa aba de outro form, como o ERP faz com as telas dentro do
-/// form principal: guarda onde estava, para encaixar igual na volta.
+/// Tela encaixada (ManualDock) numa aba de outro form, como muitos sistemas fazem com as telas
+/// dentro do form principal: guarda onde estava, para encaixar igual na volta.
 procedure AddDockInfo(F: TCustomForm; O: TJSONObject);
 var
   Site, Page: TWinControl;
@@ -394,7 +394,7 @@ begin
   Page := F.Parent;
   if (Page = nil) or (Page = Site) then
     Exit;
-  // O ERP guarda na aba o endereço do form (para fechar a aba certa); na volta, o novo.
+  // É comum guardar no Tag da aba o endereço do form (para fechar a aba certa); na volta, o novo.
   O.AddPair('pageTagIsForm', TJSONBool.Create(Page.Tag = NativeInt(F)));
   if GetPropInfo(Page, 'PageIndex') <> nil then
     O.AddPair('pageIndex', TJSONNumber.Create(GetOrdProp(Page, 'PageIndex')));
@@ -571,7 +571,7 @@ var
       Result := TWinControl(C);
   end;
 
-  /// Mesmo caminho do DockForm do ERP: ManualDock, maximiza, Show, Tag da aba, aba visível.
+  /// Mesmo caminho de um DockForm típico: ManualDock, maximiza, Show, Tag da aba, aba visível.
   procedure Dock(F: TCustomForm; O: TJSONObject; Site: TWinControl);
   var
     Page: TWinControl;
@@ -680,8 +680,9 @@ end;
 
 type
   /// Espera o programa ficar pronto para reabrir as telas:
-  ///  - as telas que estavam abertas como modal no snapshot (o form principal do ERP roda
-  ///    com ShowModal) existem e estão visíveis de novo, o que no ERP só acontece depois do login;
+  ///  - as telas que estavam abertas como modal no snapshot (há sistemas cujo form principal
+  ///    roda com ShowModal) existem e estão visíveis de novo, o que nesses sistemas só acontece
+  ///    depois do login;
   ///  - nenhuma outra tela modal aberta (um login, um aviso);
   ///  - tudo isso por 1,5 s seguidos.
   /// As telas não modais não bloqueiam: é a própria restauração que vai abri-las (e o
@@ -754,7 +755,7 @@ begin
 end;
 
 /// Tela modal aberta que não estava aberta no snapshot (um login, um aviso). Modal que já
-/// estava lá (o form principal do ERP roda com ShowModal) não conta.
+/// estava lá (um form principal que roda com ShowModal) não conta.
 function TRestorer.UnexpectedModal: string;
 var
   I: Integer;

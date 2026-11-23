@@ -2,7 +2,7 @@
 setlocal
 rem Compila o plugin da IDE: tools\ide\bin\HotReloadIDE.bpl
 rem Instalar: Component > Install Packages > Add... e escolher esse .bpl
-call "C:\Program Files (x86)\Embarcadero\Studio\23.0\bin\rsvars.bat" >nul
+call "%~dp0env.bat" || exit /b 1
 cd /d "%~dp0..\tools\ide"
 if not exist bin mkdir bin
 if not exist dcu mkdir dcu

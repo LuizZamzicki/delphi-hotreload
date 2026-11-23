@@ -189,7 +189,7 @@ var
   Base: string;
   C: TComponent;
 begin
-  Writeln('Aplicar numa tela escalada (120 DPI, como no ERP a 125%)');
+  Writeln('Aplicar numa tela escalada (120 DPI, como num monitor a 125%)');
   F := TTestForm.Create(nil);
   try
     DfmResourceText(TTestForm, Base);

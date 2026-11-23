@@ -123,7 +123,7 @@ var
   Counts: TDictionary<string, Integer>;
   Key: string;
 begin
-  // Linha a linha: o .map do ERP passa de 50 MB e o hrctl é 32 bits.
+  // Linha a linha: o .map de um projeto grande passa de 50 MB e o hrctl é 32 bits.
   Reader := TStreamReader.Create(FileName, TEncoding.ANSI, False, 1 shl 16);
   Counts := TDictionary<string, Integer>.Create(TIStringComparer.Ordinal);
   Sorted := False;

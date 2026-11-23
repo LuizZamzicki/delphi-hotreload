@@ -6,7 +6,7 @@
   A linha de comando do dcc32 que a IDE usaria (search path, defines, bibliotecas, saídas da
   configuração escolhida) é tirada do próprio msbuild: com /v:n ele registra a linha inteira
   antes de executar, mesmo quando ela passa de 32 mil caracteres e a execução falha (MSB6003,
-  caso do ERP). A partir dela são gerados, em %LOCALAPPDATA%\HotReload\<projeto>-<hash>:
+  caso de projetos grandes). A partir dela são gerados, em %LOCALAPPDATA%\HotReload\<projeto>-<hash>:
 
     resp.txt   a linha do dcc32 sem -B (build incremental)
     make.bat   build normal no lugar do exe (usado pelo "restart")
